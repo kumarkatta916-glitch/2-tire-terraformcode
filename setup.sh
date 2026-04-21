@@ -1,15 +1,15 @@
 #!/bin/bash
-exec > /var/log/setup.log 2>&1
+exec > /var/log/setup-java.log 2>&1
 
-echo "Starting setup..."
+echo "Starting Java Spring Boot setup..."
 
-# ---------- Values from Terraform ----------
+# ---------- Terraform Variables ----------
 DB_HOST="${DB_HOST}"
 DB_USER="${DB_USER}"
 DB_PASSWORD="${DB_PASSWORD}"
 DB_NAME="${DB_NAME}"
 
-# ---------- Persist ENV globally ----------
+# ---------- Persist ENV ----------
 cat <<EOF > /etc/profile.d/app_env.sh
 export DB_HOST="${DB_HOST}"
 export DB_USER="${DB_USER}"
@@ -20,108 +20,202 @@ EOF
 chmod +x /etc/profile.d/app_env.sh
 source /etc/profile.d/app_env.sh
 
-# Also for non-login services
 echo "DB_HOST=${DB_HOST}" >> /etc/environment
 echo "DB_USER=${DB_USER}" >> /etc/environment
 echo "DB_PASSWORD=${DB_PASSWORD}" >> /etc/environment
 echo "DB_NAME=${DB_NAME}" >> /etc/environment
 
-echo "ENV variables configured"
+echo "ENV configured"
 
-# ---------- System setup ----------
+# ---------- System Setup ----------
 apt update -y && apt upgrade -y
-apt install -y python3 python3-pip mysql-client
 
-# ---------- App directory ----------
-APP_DIR=/home/azureuser/student-app
-mkdir -p ${APP_DIR}
-cd ${APP_DIR}
+# Install Java + Maven + PostgreSQL client
+apt install -y openjdk-17-jdk maven postgresql-client
 
-# ---------- Python packages ----------
-pip3 install flask flask-sqlalchemy pymysql gunicorn
+echo "Java + Maven installed"
 
-# ---------- config.py (ENV BASED) ----------
-cat <<EOF > config.py
-import os
+# ---------- Create Project Structure ----------
+APP_DIR=/home/azureuser/employee-api
 
-class Config:
-    DB_HOST     = os.environ.get("DB_HOST")
-    DB_USER     = os.environ.get("DB_USER")
-    DB_PASSWORD = os.environ.get("DB_PASSWORD")
-    DB_NAME     = os.environ.get("DB_NAME")
+mkdir -p $APP_DIR/src/main/java/com/example/employeeapi/model
+mkdir -p $APP_DIR/src/main/java/com/example/employeeapi/repository
+mkdir -p $APP_DIR/src/main/java/com/example/employeeapi/controller
+mkdir -p $APP_DIR/src/main/resources
 
-    SQLALCHEMY_DATABASE_URI = (
-        f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}"
-        "?ssl_ca=/etc/ssl/certs/ca-certificates.crt"
-    )
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+cd $APP_DIR
+
+# ---------- pom.xml ----------
+cat <<EOF > pom.xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+ https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+ <modelVersion>4.0.0</modelVersion>
+
+ <parent>
+   <groupId>org.springframework.boot</groupId>
+   <artifactId>spring-boot-starter-parent</artifactId>
+   <version>3.2.0</version>
+ </parent>
+
+ <groupId>com.example</groupId>
+ <artifactId>employee-api</artifactId>
+ <version>1.0.0</version>
+
+ <properties>
+   <java.version>17</java.version>
+ </properties>
+
+ <dependencies>
+   <dependency>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-starter-web</artifactId>
+   </dependency>
+
+   <dependency>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-starter-data-jpa</artifactId>
+   </dependency>
+
+   <dependency>
+     <groupId>org.postgresql</groupId>
+     <artifactId>postgresql</artifactId>
+     <scope>runtime</scope>
+   </dependency>
+ </dependencies>
+
+ <build>
+   <plugins>
+     <plugin>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-maven-plugin</artifactId>
+     </plugin>
+   </plugins>
+ </build>
+
+</project>
 EOF
 
-# ---------- app.py ----------
-cat <<'EOF' > app.py
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from config import Config
+echo "pom.xml done"
 
-app = Flask(__name__)
-app.config.from_object(Config)
-db  = SQLAlchemy(app)
+# ---------- application.properties ----------
+cat <<EOF > src/main/resources/application.properties
 
-class Student(db.Model):
-    __tablename__ = 'students'
-    id     = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    name   = db.Column(db.String(100), nullable=False)
-    email  = db.Column(db.String(120), unique=True, nullable=False)
-    course = db.Column(db.String(100), default='General')
+spring.datasource.url=jdbc:postgresql://${DB_HOST}:5432/${DB_NAME}?sslmode=require
+spring.datasource.username=${DB_USER}
+spring.datasource.password=${DB_PASSWORD}
 
-    def to_dict(self):
-        return {'id':self.id,'name':self.name,'email':self.email,'course':self.course}
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
 
-@app.route('/')
-def home():
-    return jsonify({'message': 'Student Registration API is running on Azure!'})
+server.port=8080
 
-@app.route('/students', methods=['GET'])
-def get_all_students():
-    return jsonify([s.to_dict() for s in Student.query.all()])
-
-@app.route('/students', methods=['POST'])
-def add_student():
-    data = request.get_json()
-    student = Student(name=data['name'], email=data['email'],
-                      course=data.get('course','General'))
-    db.session.add(student)
-    db.session.commit()
-    return jsonify({'message':'Student added!','student':student.to_dict()}), 201
-
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    app.run(host='0.0.0.0', port=5000)
 EOF
+
+# ---------- Employee.java ----------
+cat <<EOF > src/main/java/com/example/employeeapi/model/Employee.java
+package com.example.employeeapi.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "employees")
+public class Employee {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+    private String email;
+    private String department;
+    private Double salary;
+
+    public Employee() {}
+
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public String getEmail() { return email; }
+    public String getDepartment() { return department; }
+    public Double getSalary() { return salary; }
+
+    public void setName(String name) { this.name = name; }
+    public void setEmail(String email) { this.email = email; }
+    public void setDepartment(String department) { this.department = department; }
+    public void setSalary(Double salary) { this.salary = salary; }
+}
+EOF
+
+# ---------- Repository ----------
+cat <<EOF > src/main/java/com/example/employeeapi/repository/EmployeeRepository.java
+package com.example.employeeapi.repository;
+
+import com.example.employeeapi.model.Employee;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface EmployeeRepository extends JpaRepository<Employee, Long> {
+}
+EOF
+
+# ---------- Controller ----------
+cat <<EOF > src/main/java/com/example/employeeapi/controller/EmployeeController.java
+package com.example.employeeapi.controller;
+
+import com.example.employeeapi.model.Employee;
+import com.example.employeeapi.repository.EmployeeRepository;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/employees")
+public class EmployeeController {
+
+    private final EmployeeRepository repo;
+
+    public EmployeeController(EmployeeRepository repo) {
+        this.repo = repo;
+    }
+
+    @GetMapping
+    public List<Employee> getAll() {
+        return repo.findAll();
+    }
+
+    @PostMapping
+    public Employee create(@RequestBody Employee e) {
+        return repo.save(e);
+    }
+}
+EOF
+
+# ---------- Main Class ----------
+cat <<EOF > src/main/java/com/example/employeeapi/EmployeeApiApplication.java
+package com.example.employeeapi;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class EmployeeApiApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(EmployeeApiApplication.class, args);
+    }
+}
+EOF
+
+echo "Java source files created"
 
 # ---------- Wait for DB ----------
 sleep 30
 
-# ---------- Create DB ----------
-mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" --ssl-mode=REQUIRED \
-  -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+# ---------- Build ----------
+mvn clean package -DskipTests
 
-# ---------- Test DB ----------
-python3 - <<PY
-import os, pymysql
-conn = pymysql.connect(
-  host=os.environ['DB_HOST'],
-  user=os.environ['DB_USER'],
-  password=os.environ['DB_PASSWORD'],
-  database=os.environ['DB_NAME'],
-  ssl={'ssl_ca':'/etc/ssl/certs/ca-certificates.crt'}
-)
-print("DB CONNECT OK")
-conn.close()
-PY
+# ---------- Run ----------
+nohup java -jar target/employee-api-1.0.0.jar > app.log 2>&1 &
 
-# ---------- Start app ----------
-nohup python3 app.py > app.log 2>&1 &
-
-echo "Setup completed"
+echo "Java Spring Boot app started on port 8080"
